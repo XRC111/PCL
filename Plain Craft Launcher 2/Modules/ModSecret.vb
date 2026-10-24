@@ -189,7 +189,7 @@ Friend Module ModSecret
     ''' </summary>
     Private Function UpdateGetLatestRelease() As JObject
         Try
-            Dim Headers As New String(,) {{"User-Agent", "PCL2/" & VersionBaseName}, {"Accept", "application/vnd.github+json"}}
+            Dim Headers(,) As String = {{"User-Agent", "PCL2/" & VersionBaseName}, {"Accept", "application/vnd.github+json"}}
             Dim Raw As String = NetRequestByClientRetry(UpdateRepoApi & "/releases/latest", RequireJson:=True, Headers:=Headers)
             Dim Json As JObject = Raw.DeserializeJson()
             Dim Tag As String = If(Json("tag_name"), "").ToString.Trim
