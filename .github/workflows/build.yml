@@ -1,69 +1,99 @@
 name: Build
+
 on:
   push:
-    paths:
-      - 'Plain Craft Launcher 2/**'
-      - '.github/workflows/**'
+    branches:
+      - main
+      - 'ci/**'
+    paths-ignore:
+      - '**.md'
+      - 'patches/**'
+      - '最新正式版.zip'
   pull_request:
-    paths:
-      - 'Plain Craft Launcher 2/**'
-      - '.github/workflows/**'
+    branches:
+      - main
   workflow_dispatch:
+    inputs:
+      configuration:
+        description: '构建配置 (Release / Snapshot / Debug)'
+        required: false
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Snapshot
+          - Debug
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 
 jobs:
   build:
-    name: Build
+    name: Build (${{ matrix.configuration }})
     runs-on: windows-latest
-    strategy:  
-       matrix:  
-         configuration: [Debug, Release]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Snapshot]
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-    - name: Checkout
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 1
-        submodules: true
+      - name: Describe
+        shell: pwsh
+        run: |
+          $desc = (git describe --tags --always --dirty 2>$null)
+          if ([string]::IsNullOrWhiteSpace($desc)) { $desc = $env:GITHUB_SHA.Substring(0, 7) }
+          "PCL_DESCRIBE=$desc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-    - name: Set Describe
-      shell: bash
-      run: |
-          describe=`git describe --tags --always`
-          echo "describe=$describe" >> $GITHUB_ENV
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
 
-    - name: Setup MSBuild.exe
-      uses: microsoft/setup-msbuild@v3
-      with:
-        msbuild-architecture: x64
-    
-    - name: Update Help
-      run:  |
-        Set-Location ..
-        git clone https://github.com/LTCatt/PCL2Help.git -b master --single-branch --depth 1
-        Set-Location PCL2Help
-        Remove-Item -Path *.* -Recurse -Force
-        Compress-Archive -Path .\* -DestinationPath .\Help.zip
-        Copy-Item -Path .\Help.zip -Destination "${{ GITHUB.WORKSPACE }}\Plain Craft Launcher 2\Resources\Help.zip" -Force
-        Set-Location ..
-        Remove-Item PCL2Help -Recurse -Force
-        Set-Location ${{ GITHUB.WORKSPACE }}
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
 
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: dotnet restore "PCLCS\PCLCS.csproj"
 
-    - name: Replace
-      run: |
-        (gc "Plain Craft Launcher 2\Modules\ModSecret.vb") -replace 'Public OAuthClientId As String = If(Environment.GetEnvironmentVariable("PCL_MS_CLIENT_ID"), "")', 'Public OAuthClientId As String = If(Environment.GetEnvironmentVariable("PCL_MS_CLIENT_ID"), "${{ secrets.CLIENT_ID }}")' | Out-File "Plain Craft Launcher 2\Modules\ModSecret.vb"
-        (gc "Plain Craft Launcher 2\Modules\ModSecret.vb") -replace 'Public CurseForgeAPIKey As String = If(Environment.GetEnvironmentVariable("PCL_CURSEFORGE_API_KEY"), "")', 'Public CurseForgeAPIKey As String = If(Environment.GetEnvironmentVariable("PCL_CURSEFORGE_API_KEY"), "${{ secrets.CURSEFORGE_API_KEY }}")' | Out-File "Plain Craft Launcher 2\Modules\ModSecret.vb"
-        (gc "Plain Craft Launcher 2\Modules\Base\ModBase.vb") -replace 'Public Const CommitHash As String = ""', 'Public Const CommitHash As String = "${{ github.sha }}"' | Out-File "Plain Craft Launcher 2\Modules\Base\ModBase.vb"
-        
-    - name: Restore NuGet Packages
-      run: dotnet restore PCLCS\PCLCS.csproj
+      - name: Build
+        shell: pwsh
+        run: |
+          msbuild "Plain Craft Launcher 2\Plain Craft Launcher 2.vbproj" `
+            /p:Configuration=${{ matrix.configuration }} `
+            /p:Platform=AnyCPU `
+            /p:ContinuousIntegrationBuild=true `
+            /m /v:minimal /nologo
 
-    - name: Build
-      run: msbuild "Plain Craft Launcher 2\Plain Craft Launcher 2.vbproj" -p:Configuration=${{ matrix.configuration }}
+      - name: Collect output
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $bin = "Plain Craft Launcher 2\bin"
+          if (Test-Path $bin) { Copy-Item "$bin\*" dist -Recurse -Force }
+          Get-ChildItem dist -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
+          if (-not (Test-Path "dist\Plain Craft Launcher 2.exe")) {
+            throw "Build finished but 'Plain Craft Launcher 2.exe' was not produced."
+          }
 
-    - name: Upload a Build Artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ matrix.configuration }} ${{ env.describe }}
-        path: Plain Craft Launcher 2\obj\${{ matrix.configuration }}\Plain Craft Launcher 2.exe
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: PCL-${{ matrix.configuration }}-${{ env.PCL_DESCRIBE }}
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 14
