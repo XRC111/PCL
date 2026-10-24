@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - 'ci/**'
+    tags:
+      - 'v*'
     paths-ignore:
       - '**.md'
       - 'patches/**'
@@ -70,6 +72,37 @@ jobs:
         with:
           msbuild-architecture: x64
 
+      - name: Inject build secrets
+        shell: pwsh
+        env:
+          MS_CLIENT_ID: ${{ secrets.PCL_MS_CLIENT_ID }}
+          CF_API_KEY: ${{ secrets.PCL_CURSEFORGE_API_KEY }}
+        run: |
+          $path = "Plain Craft Launcher 2\Modules\ModSecret.vb"
+          $content = Get-Content -LiteralPath $path -Raw
+          $changed = $false
+          if ($env:MS_CLIENT_ID) {
+            $old = 'Public OAuthClientId As String = If(Environment.GetEnvironmentVariable("PCL_MS_CLIENT_ID"), "")'
+            if (-not $content.Contains($old)) { throw "未找到 OAuthClientId 注入点，请检查 ModSecret.vb" }
+            $new = 'Public OAuthClientId As String = If(Environment.GetEnvironmentVariable("PCL_MS_CLIENT_ID"), "' + $env:MS_CLIENT_ID + '")'
+            $content = $content.Replace($old, $new)
+            $changed = $true
+            Write-Host "已注入微软登录 Client ID"
+          } else {
+            Write-Host "未配置 PCL_MS_CLIENT_ID，跳过正版登录注入（仍可用同名环境变量在运行时提供）"
+          }
+          if ($env:CF_API_KEY) {
+            $old = 'Public CurseForgeAPIKey As String = If(Environment.GetEnvironmentVariable("PCL_CURSEFORGE_API_KEY"), "")'
+            if (-not $content.Contains($old)) { throw "未找到 CurseForgeAPIKey 注入点，请检查 ModSecret.vb" }
+            $new = 'Public CurseForgeAPIKey As String = If(Environment.GetEnvironmentVariable("PCL_CURSEFORGE_API_KEY"), "' + $env:CF_API_KEY + '")'
+            $content = $content.Replace($old, $new)
+            $changed = $true
+            Write-Host "已注入 CurseForge API Key"
+          } else {
+            Write-Host "未配置 PCL_CURSEFORGE_API_KEY，跳过 CurseForge 注入（仍可用同名环境变量在运行时提供）"
+          }
+          if ($changed) { Set-Content -LiteralPath $path -Value $content -NoNewline -Encoding utf8BOM }
+
       - name: Restore NuGet packages
         shell: pwsh
         run: dotnet restore "PCLCS\PCLCS.csproj"
@@ -100,3 +133,36 @@ jobs:
           path: dist/**
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: PCL-Release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Package
+        run: |
+          ls -al dist
+          cd dist && zip -r "../PCL-${GITHUB_REF_NAME}.zip" . && cd ..
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "PCL-${GITHUB_REF_NAME}.zip" \
+            "dist/Plain Craft Launcher 2.exe" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PCL ${GITHUB_REF_NAME}" \
+            --generate-notes
+

@@ -1,0 +1,5 @@
+{
+  "notice": "这是 XRC111 的 PCL 构建版本：已恢复 MC 下载、更新检查与联网通知。更新检查走本仓库的 GitHub Releases，快照版与正式版的版本号见下方字段。",
+  "releaseCode": 413,
+  "snapshotCode": 414
+}

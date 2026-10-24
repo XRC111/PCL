@@ -147,9 +147,70 @@ Friend Module ModSecret
 
 #Region "更新"
 
+    '本分支的发布渠道：本仓库自己的 GitHub Releases
+    Private Const UpdateRepoApi As String = "https://api.github.com/repos/XRC111/PCL"
+    Private Const UpdateReleasePage As String = "https://github.com/XRC111/PCL/releases/latest"
+
+    ''' <summary>
+    ''' 检查更新。发现新版本时展示更新内容，并引导前往下载页。
+    ''' </summary>
     Friend Sub UpdateCheckByButton()
-        Hint("该版本中不包含更新功能……")
+        Hint("正在检查更新……", HintType.Blue, Log:=False)
+        RunInThread(
+        Sub()
+            Try
+                Dim Release As JObject = UpdateGetLatestRelease()
+                If Release Is Nothing Then
+                    Hint("检查更新失败，请检查网络连接", HintType.Red)
+                    Return
+                End If
+                Dim Latest As Version = Nothing
+                If Not Version.TryParse(Release("version").ToString, Latest) Then
+                    Hint("检查更新失败：无法解析版本号 " & Release("version").ToString, HintType.Red)
+                    Return
+                End If
+                If Latest <= New Version(VersionBaseName) Then
+                    Hint($"当前已是最新版本（{VersionBaseName}）", HintType.Green)
+                    Return
+                End If
+                Dim Notes As String = Release("notes").ToString.Trim
+                If Notes.Length > 600 Then Notes = Notes.Substring(0, 600) & "……"
+                MyMsgBox($"发现新版本 {Latest}，当前版本 {VersionBaseName}。{vbCrLf}{vbCrLf}{Notes}",
+                         "检查更新", "前往下载", "稍后", Button1Action:=Sub() OpenWebsite(UpdateReleasePage))
+            Catch ex As Exception
+                Logger.Error(ex, "检查更新失败")
+                Hint("检查更新失败：" & ex.Message, HintType.Red)
+            End Try
+        End Sub)
     End Sub
+
+    ''' <summary>
+    ''' 拉取本仓库最新的 Release 信息，返回 version、notes、exe 三个字段。失败返回 Nothing。
+    ''' </summary>
+    Private Function UpdateGetLatestRelease() As JObject
+        Try
+            Dim Headers As New String(,) {{"User-Agent", "PCL2/" & VersionBaseName}, {"Accept", "application/vnd.github+json"}}
+            Dim Raw As String = NetRequestByClientRetry(UpdateRepoApi & "/releases/latest", RequireJson:=True, Headers:=Headers)
+            Dim Json As JObject = Raw.DeserializeJson()
+            Dim Tag As String = If(Json("tag_name"), "").ToString.Trim
+            If Tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) Then Tag = Tag.Substring(1)
+            If String.IsNullOrEmpty(Tag) Then Return Nothing
+            Dim ExeUrl As String = ""
+            Dim Assets = TryCast(Json("assets"), JArray)
+            If Assets IsNot Nothing Then
+                For Each Asset As JObject In Assets
+                    If If(Asset("name"), "").ToString.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) Then
+                        ExeUrl = If(Asset("browser_download_url"), "").ToString
+                        Exit For
+                    End If
+                Next
+            End If
+            Return New JObject(New JProperty("version", Tag), New JProperty("notes", If(Json("body"), "").ToString), New JProperty("exe", ExeUrl))
+        Catch ex As Exception
+            Logger.Warn(ex, "获取最新版本信息失败")
+            Return Nothing
+        End Try
+    End Function
 
     Friend IsUpdateWaitingRestart As Boolean = False
     Public Sub UpdateRestart(TriggerRestartAndByEnd As Boolean)
@@ -159,10 +220,14 @@ Friend Module ModSecret
 
     ''' <summary>
     ''' 确保 PathTemp/Latest.exe 是最新正式版的 PCL，它会被用于整合包打包。
-    ''' 如果不是，则下载一个。
+    ''' 若不是最新，则下载一个。
     ''' </summary>
     Friend Sub DownloadLatestPCL(Optional LoaderToSyncProgress As LoaderBase = Nothing)
-        '注意：如果要自行实现这个功能，请换用另一个文件路径，以免与官方版本冲突
+        Dim Release As JObject = UpdateGetLatestRelease()
+        If Release Is Nothing Then Throw New Exception("获取最新版本信息失败，请检查网络连接")
+        Dim ExeUrl As String = Release("exe").ToString
+        If String.IsNullOrEmpty(ExeUrl) Then Throw New Exception($"未在 {Release("version")} 的发布中找到启动器文件")
+        NetDownloadByLoader({ExeUrl}, PathTemp & "Latest.exe", LoaderToSyncProgress, New FileChecker With {.MinSize = 1024 * 1024})
     End Sub
 
 #End Region
@@ -175,7 +240,49 @@ Friend Module ModSecret
     ''' </summary>
     Public ServerConfig As JObject
 
-    Public ServerLoader As New LoaderTask(Of Integer, Integer)("PCL 配置更新", Sub() Logger.Info("该版本中不包含更新通知功能……"), Priority:=ThreadPriority.BelowNormal) With
+    ''' <summary>
+    ''' 联网通知源，可用环境变量 PCL_NOTICE_URL 覆盖，需指向一个 JSON 文件。
+    ''' </summary>
+    Private Function ServerNoticeUrl() As String
+        Dim FromEnv As String = Environment.GetEnvironmentVariable("PCL_NOTICE_URL")
+        If Not String.IsNullOrEmpty(FromEnv) Then Return FromEnv
+        Return "https://raw.githubusercontent.com/XRC111/PCL/main/.pcl/notice.json"
+    End Function
+
+    ''' <summary>
+    ''' 联网获取通知与配置，并把版本号写入更新检查缓存（Cache\Notice.cfg）。
+    ''' 配置格式：{"notice": "公告文本", "snapshotCode": 414, "releaseCode": 413}
+    ''' </summary>
+    Private Sub ServerLoaderMain()
+        Try
+            Dim Raw As String = NetRequestByClientRetry(ServerNoticeUrl(), RequireJson:=True)
+            If String.IsNullOrWhiteSpace(Raw) Then Return
+            Dim Json As JObject = Raw.DeserializeJson()
+            ServerConfig = Json
+            '写入更新缓存，供 PageSetupSystem.IsLauncherNewest 使用
+            Dim ReleaseCode As Integer = VersionCode
+            Dim SnapshotCode As Integer = VersionCode
+            If Json("releaseCode") IsNot Nothing Then ReleaseCode = Json("releaseCode").ToObject(Of Integer)()
+            If Json("snapshotCode") IsNot Nothing Then SnapshotCode = Json("snapshotCode").ToObject(Of Integer)()
+            Try
+                IO.Directory.CreateDirectory(PathTemp & "Cache")
+                FileUtils.Write(PathTemp & "Cache\Notice.cfg", $"PCL|{SnapshotCode}|{ReleaseCode}")
+            Catch ex As Exception
+                Logger.Warn(ex, "写入更新缓存失败")
+            End Try
+            '同一条公告只提示一次
+            Dim Notice As String = If(Json("notice"), "").ToString.Trim
+            If Notice.Length = 0 Then Return
+            Dim ReadMark As String = PathTemp & "Cache\NoticeRead.txt"
+            If FileUtils.TryReadAsString(ReadMark) = Notice Then Return
+            FileUtils.Write(ReadMark, Notice)
+            MyMsgBox(Notice, "公告")
+        Catch ex As Exception
+            Logger.Warn(ex, "联网获取通知失败")
+        End Try
+    End Sub
+
+    Public ServerLoader As New LoaderTask(Of Integer, Integer)("PCL 配置更新", AddressOf ServerLoaderMain, Priority:=ThreadPriority.BelowNormal) With
         {.ReloadTimeout = 1000 * 60 * 60} '超时 1 小时
 
 #End Region
