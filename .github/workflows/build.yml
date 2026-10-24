@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: [Release, Snapshot]
+        configuration: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.configuration)) || fromJSON('["Release","Snapshot"]') }}
 
     steps:
       - name: Checkout
