@@ -15,7 +15,9 @@ Friend Module ModSecret
 
 #Region "网络鉴权"
 
-    Public Const RestrictMcDownload As Boolean = True
+    '开源版原本为 True，会整体关闭 MC 下载（版本列表、整合包安装、修改页、资源页一键安装）
+    '本分支关闭该限制以恢复核心下载功能，下载源仍为 Mojang 官方源、BMCLAPI 与 mcimirror
+    Public Const RestrictMcDownload As Boolean = False
     Friend Function SecretCdnSign(UrlWithMark As String) As String
         If Not UrlWithMark.EndsWithF("{CDN}") Then Return UrlWithMark
         Return UrlWithMark.Replace("{CDN}", "").Replace(" ", "%20")
