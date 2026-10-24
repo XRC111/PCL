@@ -76,7 +76,6 @@ jobs:
           msbuild "Plain Craft Launcher 2\Plain Craft Launcher 2.vbproj" `
             /p:Configuration=${{ matrix.configuration }} `
             /p:Platform=AnyCPU `
-            /p:ContinuousIntegrationBuild=true `
             /m /v:minimal /nologo
 
       - name: Collect output
