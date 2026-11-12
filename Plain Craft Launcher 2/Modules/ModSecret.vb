@@ -202,7 +202,9 @@ Friend Module ModSecret
                 Dim Notes As String = Release("notes").ToString.Trim
                 If Notes.Length > 600 Then Notes = Notes.Substring(0, 600) & "……"
                 MyMsgBox($"发现新版本 {Latest}，当前版本 {VersionBaseName}。{vbCrLf}{vbCrLf}{Notes}",
-                         "检查更新", "前往下载", "稍后", Button1Action:=Sub() OpenWebsite(UpdateReleasePage))
+                         "检查更新", "下载并更新", "前往下载页", "稍后",
+                         Button1Action:=Sub() UpdateDownloadAndApply(Latest.ToString),
+                         Button2Action:=Sub() OpenWebsite(UpdateReleasePage))
             Catch ex As Exception
                 Logger.Error(ex, "检查更新失败")
                 Hint("检查更新失败：" & ex.Message, HintType.Red)
@@ -248,9 +250,104 @@ Friend Module ModSecret
     End Function
 
     Friend IsUpdateWaitingRestart As Boolean = False
-    Public Sub UpdateRestart(TriggerRestartAndByEnd As Boolean)
+
+    ''' <summary>
+    ''' 下载最新版本到 PathTemp\Latest.exe，并标记为等待重启。
+    ''' 正常退出时 FormMain.EndProgramForce 会调用 UpdateRestart(False) 自动完成替换；
+    ''' 点「立即重启」则调用 UpdateRestart(True) 替换后直接启动新版本。
+    ''' </summary>
+    Friend Sub UpdateDownloadAndApply(LatestVersion As String)
+        RunInThread(
+        Sub()
+            Try
+                Hint("正在下载更新……", HintType.Blue, Log:=False)
+                '清掉上一次残留的更新包，避免下载器复用旧文件
+                Try
+                    If FileUtils.Exists(PathTemp & "Latest.exe") Then FileUtils.Delete(PathTemp & "Latest.exe")
+                Catch ex As Exception
+                    Logger.Warn(ex, "清理旧更新包失败")
+                End Try
+                DownloadLatestPCL()
+                Dim NewExe As String = PathTemp & "Latest.exe"
+                If Not FileUtils.Exists(NewExe) OrElse New IO.FileInfo(NewExe).Length < 1024 * 1024 Then
+                    Throw New Exception("下载的更新文件无效")
+                End If
+                IsUpdateWaitingRestart = True
+                Hint($"更新 {LatestVersion} 已下载完成", HintType.Green, Log:=False)
+                MyMsgBox($"新版本 {LatestVersion} 已下载完成，重启启动器后生效。{vbCrLf}若选择「稍后」，关闭启动器时也会自动完成替换。",
+                         "更新就绪", "立即重启", "稍后",
+                         Button1Action:=Sub() UpdateRestart(True))
+            Catch ex As Exception
+                Logger.Error(ex, "下载更新失败")
+                Hint("下载更新失败：" & ex.Message, HintType.Red)
+                OpenWebsite(UpdateReleasePage)
+            End Try
+        End Sub)
     End Sub
+
+    ''' <summary>
+    ''' 提交更新替换。Windows 不允许覆盖正在运行的 exe，因此以 --update 参数启动
+    ''' 已下载的新 exe，由它在 Application_Startup 中调用 UpdateReplace 完成替换。
+    ''' </summary>
+    ''' <param name="TriggerRestartAndByEnd">True：用户主动重启，替换后启动新版本并结束当前程序；
+    ''' False：由退出流程调用，只提交替换，不主动重启。</param>
+    Public Sub UpdateRestart(TriggerRestartAndByEnd As Boolean)
+        Try
+            Dim NewExe As String = PathTemp & "Latest.exe"
+            If Not FileUtils.Exists(NewExe) Then
+                Logger.Warn("更新替换失败：未找到已下载的新版本 " & NewExe)
+                IsUpdateWaitingRestart = False
+                Return
+            End If
+            If Not FileUtils.Exists(PathExe) Then
+                Logger.Warn("更新替换失败：未找到当前启动器 " & PathExe)
+                IsUpdateWaitingRestart = False
+                Return
+            End If
+            '先清标记，避免 EndProgramForce 再次触发本方法
+            IsUpdateWaitingRestart = False
+            Dim RestartFlag As String = If(TriggerRestartAndByEnd, "True", "False")
+            Dim Args As String = $"--update {System.Diagnostics.Process.GetCurrentProcess().Id} ""{PathExe}"" ""{NewExe}"" {RestartFlag}"
+            StartProcess(NewExe, Args)
+            Logger.Info("已启动更新替换进程：" & Args)
+            If TriggerRestartAndByEnd Then FormMain.EndProgramForce()
+        Catch ex As Exception
+            Logger.Error(ex, "启动更新替换失败")
+            IsUpdateWaitingRestart = False
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' 更新器模式（新 exe 以 --update 启动）执行实际替换：等待旧进程退出 → 覆盖旧 exe → 按需重启。
+    ''' </summary>
     Public Sub UpdateReplace(ProcessId As Integer, OldFileName As String, NewFileName As String, TriggerRestart As Boolean)
+        Try
+            '等待旧启动器完全退出
+            Try
+                Dim OldProcess As System.Diagnostics.Process = System.Diagnostics.Process.GetProcessById(ProcessId)
+                If Not OldProcess.WaitForExit(30000) Then Logger.Warn("等待旧启动器退出超时")
+            Catch ex As ArgumentException
+                '旧进程已经退出
+            End Try
+            '覆盖旧 exe（FileUtils.Copy 内部自带 IOException 重试）
+            Dim Replaced As Boolean = False
+            Try
+                FileUtils.Copy(NewFileName, OldFileName)
+                Replaced = True
+            Catch ex As Exception
+                Logger.Error(ex, "覆盖启动器文件失败")
+            End Try
+            If Not Replaced Then
+                MsgBox($"更新失败：无法写入 {OldFileName}。{vbCrLf}请手动用 {NewFileName} 替换该文件。",
+                       MsgBoxStyle.Critical, "PCL 更新失败")
+                Return
+            End If
+            Logger.Info("启动器已更新：" & OldFileName)
+            If TriggerRestart Then StartProcess(OldFileName)
+        Catch ex As Exception
+            Logger.Error(ex, "更新替换失败")
+            MsgBox("更新失败：" & ex.Message, MsgBoxStyle.Critical, "PCL 更新失败")
+        End Try
     End Sub
 
     ''' <summary>
