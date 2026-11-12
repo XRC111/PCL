@@ -151,6 +151,32 @@ Friend Module ModSecret
     Private Const UpdateRepoApi As String = "https://api.github.com/repos/XRC111/PCL"
     Private Const UpdateReleasePage As String = "https://github.com/XRC111/PCL/releases/latest"
 
+    'GitHub 镜像源，可用环境变量 PCL_GH_MIRROR 覆盖；设为 none/off 可禁用。
+    Private Function GhMirrorPrefix() As String
+        Dim FromEnv As String = Environment.GetEnvironmentVariable("PCL_GH_MIRROR")
+        If FromEnv IsNot Nothing Then
+            FromEnv = FromEnv.Trim
+            If FromEnv.Equals("none", StringComparison.OrdinalIgnoreCase) Then Return ""
+            If FromEnv.Equals("off", StringComparison.OrdinalIgnoreCase) Then Return ""
+        End If
+        If String.IsNullOrEmpty(FromEnv) Then FromEnv = "https://gh-proxy.org/"
+        If Not FromEnv.EndsWith("/", StringComparison.Ordinal) Then FromEnv &= "/"
+        Return FromEnv
+    End Function
+
+    ''' <summary>
+    ''' 为 GitHub / raw.githubusercontent.com 链接生成候选地址：镜像优先，直连兜底。
+    ''' 非 GitHub 链接（如 PCL_NOTICE_URL 自定义源）原样返回。
+    ''' </summary>
+    Private Function GhMirrorUrls(Url As String) As String()
+        If String.IsNullOrEmpty(Url) Then Return {Url}
+        If Not (Url.Contains("github.com") OrElse Url.Contains("githubusercontent.com")) Then Return {Url}
+        Dim Prefix As String = GhMirrorPrefix()
+        If String.IsNullOrEmpty(Prefix) Then Return {Url}
+        If Url.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase) Then Return {Url}
+        Return {Prefix & Url, Url}
+    End Function
+
     ''' <summary>
     ''' 检查更新。发现新版本时展示更新内容，并引导前往下载页。
     ''' </summary>
@@ -190,7 +216,16 @@ Friend Module ModSecret
     Private Function UpdateGetLatestRelease() As JObject
         Try
             Dim Headers(,) As String = {{"User-Agent", "PCL2/" & VersionBaseName}, {"Accept", "application/vnd.github+json"}}
-            Dim Raw As String = NetRequestByClientRetry(UpdateRepoApi & "/releases/latest", RequireJson:=True, Headers:=Headers)
+            Dim Raw As String = ""
+            For Each Url As String In GhMirrorUrls(UpdateRepoApi & "/releases/latest")
+                Try
+                    Raw = NetRequestByClientRetry(Url, RequireJson:=True, Headers:=Headers)
+                    If Not String.IsNullOrWhiteSpace(Raw) Then Exit For
+                Catch ex As Exception
+                    Logger.Warn(ex, "获取最新版本信息失败，尝试下一个源：" & Url)
+                End Try
+            Next
+            If String.IsNullOrWhiteSpace(Raw) Then Return Nothing
             Dim Json As JObject = Raw.DeserializeJson()
             Dim Tag As String = If(Json("tag_name"), "").ToString.Trim
             If Tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) Then Tag = Tag.Substring(1)
@@ -227,7 +262,7 @@ Friend Module ModSecret
         If Release Is Nothing Then Throw New Exception("获取最新版本信息失败，请检查网络连接")
         Dim ExeUrl As String = Release("exe").ToString
         If String.IsNullOrEmpty(ExeUrl) Then Throw New Exception($"未在 {Release("version")} 的发布中找到启动器文件")
-        NetDownloadByLoader({ExeUrl}, PathTemp & "Latest.exe", LoaderToSyncProgress, New FileChecker With {.MinSize = 1024 * 1024})
+        NetDownloadByLoader(GhMirrorUrls(ExeUrl), PathTemp & "Latest.exe", LoaderToSyncProgress, New FileChecker With {.MinSize = 1024 * 1024})
     End Sub
 
 #End Region
@@ -255,7 +290,15 @@ Friend Module ModSecret
     ''' </summary>
     Private Sub ServerLoaderMain()
         Try
-            Dim Raw As String = NetRequestByClientRetry(ServerNoticeUrl(), RequireJson:=True)
+            Dim Raw As String = ""
+            For Each Url As String In GhMirrorUrls(ServerNoticeUrl())
+                Try
+                    Raw = NetRequestByClientRetry(Url, RequireJson:=True)
+                    If Not String.IsNullOrWhiteSpace(Raw) Then Exit For
+                Catch ex As Exception
+                    Logger.Warn(ex, "联网配置获取失败，尝试下一个源：" & Url)
+                End Try
+            Next
             If String.IsNullOrWhiteSpace(Raw) Then Return
             Dim Json As JObject = Raw.DeserializeJson()
             ServerConfig = Json
