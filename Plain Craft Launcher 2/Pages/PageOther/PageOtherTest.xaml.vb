@@ -91,8 +91,9 @@ Public Class PageOtherTest
     Friend Sub AttachDownload(Loader As LoaderBase)
         If LoadDownload Is Nothing Then Return
         LoadDownload.Visibility = Visibility.Visible
-        LoadDownload.State = Loader
         LabDownloadState.Text = "正在下载……"
+        '未加载时挂状态会绑不上，等 Loaded 时再补
+        If IsLoaded Then LoadDownload.State = Loader
     End Sub
 
     ''' <summary>
@@ -110,8 +111,17 @@ Public Class PageOtherTest
         FrmOtherTest.LabToolState.Text = Text
     End Sub
 
-    Private Shared Sub AttachDownloadOnPage(Loader As LoaderBase)
+    Private Shared Sub PrepareDownloadPage(Url As String, Folder As String, FileName As String, Loader As LoaderBase)
+        '从自定义事件进来时顺带切到百宝箱，方便看到进度
+        Try
+            If FrmMain IsNot Nothing Then FrmMain.PageChange(FormMain.PageType.Other, FormMain.PageSubType.OtherTest)
+        Catch ex As Exception
+            Logger.Warn(ex, "切换到百宝箱页面失败")
+        End Try
         If FrmOtherTest Is Nothing Then Return
+        FrmOtherTest.TextDownloadUrl.Text = Url
+        FrmOtherTest.TextDownloadFolder.Text = Folder
+        FrmOtherTest.TextDownloadName.Text = FileName
         FrmOtherTest.AttachDownload(Loader)
     End Sub
 
@@ -152,7 +162,7 @@ Public Class PageOtherTest
                         NetDownloadByLoader(Url, LocalPath, Loader, New FileChecker With {.MinSize = 1})
                     End Sub)
                 CurrentDownload = DownloadTask
-                RunInUi(Sub() AttachDownloadOnPage(DownloadTask))
+                RunInUi(Sub() PrepareDownloadPage(Url, TargetFolder, FileName, DownloadTask))
                 DownloadTask.WaitForExit()
                 If DownloadTask.State <> LoadState.Finished Then Throw New Exception("下载未完成，可能是网络中断或文件校验失败")
                 RunInUi(
